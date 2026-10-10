@@ -1,85 +1,140 @@
-import math
-from typing import Literal
+# Proving access to game controls (and any other) throgh HID (Human Interface Device)
+
+import sys
 import hid
+import logging
 
-
-# Some constraints (source https://www.usb.org/sites/default/files/hid1_11.pdf):
-#   - Only one Top-Level Collection is allowed.
-#   - Top-Level Collection Must Be an Application Collection
-
+# HidDevice class
+# encapsulates a hid.Device class.
+#
+# see:
+# https://www.usb.org/sites/default/files/hid1_11.pdf
+# https://www.usb.org/sites/default/files/hut1_7.pdf
+#
+# Must known:
+# A HID is a device with a vendorId:productId unique pair
+# A HID must have a HID report descriptor, that descriptor talks about the form of the USB data frame
+# to read (Input reports) or write (Output, Feature reports)
+# We can call "control" a source of data wich talks about the state of an axis or button (for example)
+# An Input report can contain multiple "controls" data, every control in an input report shares
+# how the data is stored and processed. For example a bit array with [0,1] for button states.
+# In Input reports, each control (or source of data) has a name associated, Hid Usage Tables
+# is the specification to translate usagePage/usage pair to human readable form.
+# The control usage is orientative, is the one assigned by vendor. Joystick axes are usually assigned
+# to X, Y, Z, Rx, Ry, Rz or Slider usages.
+#
 class HidDevice(hid.Device):
-    def __init__(self, vendorId, productId):
+    def __init__(self, vendorId, productId, debug=False):
         super().__init__(vendorId, productId)
         self.nonblocking = True
         self.__currentState = self.read(64)
         self.__lastState = [0]*len(self.__currentState)
-        self.__descriptor = HidReportDescriptor(self.get_report_descriptor())
-        self.__inputs = self.__descriptor.inputs()
-        self.__state = {}
+        self.__hid_descriptor = HidReportDescriptor(self.get_report_descriptor())
+        self.__inputReports = self.__hid_descriptor.inputs()
+        self.__usageData = {}
+        self.__inputUsage = []
         self.__byteWatch = []
         self.__usageWatch = []
-        for input in self.__inputs:
-            for b,fm in input.fieldMap.items():
-                for f in fm:
-                    self.__state[f[0]] = 0
+        self.__updateTick = 0
+        self.__debug = debug
+        for inputReport in self.__inputReports:
+            for usageName in inputReport.usage:
+                self.__inputUsage.append(usageName)
+            for b, uds in inputReport.byteMap.items():
+                for ud in uds:
+                    self.__usageData[ud[0]] = [0, inputReport, ud, 0]
+        if debug:
+            for i in self.__inputUsage:
+                 self.watch(i)
+
+    # def __getattr__(self, name: str):
+    #     return self.__state[name]
+
+    def inputUsages(self):
+        return self.__inputUsage.copy()
 
     def watch(self, usage):
-        if not usage in self.__state: return False
+        if not usage in self.__usageData: return False
         if usage in self.__usageWatch: return True
         self.__usageWatch.append(usage)
         self.__rebuild_byte_watch()
         return True
 
     def unwatch(self, usage):
-        if not usage in self.__state: return
+        if not usage in self.__usageData: return
         if not usage in self.__usageWatch: return
         self.__usageWatch.remove(usage)
         self.__rebuild_byte_watch()
 
     # rebuild usage watch
+    # the byte watching system avoids to examinate all the "state" for changes
+    # this method marks for watch only the bytes where are allocated the data
+    # or part of the data in the watching list
     def __rebuild_byte_watch(self):
         self.__byteWatch = []
-        for input in self.__inputs:
-            for b,fm in input.fieldMap.items():
-                for f in fm:
-                    if f[0] in self.__usageWatch:
-                        for i in range(f[1], f[1]+f[2]):
+        for inputReport in self.__inputReports:
+            for b,uds in inputReport.byteMap.items():
+                for ud in uds:
+                    if ud[0] in self.__usageWatch:
+                        for i in range(ud[1], ud[1]+ud[2]):
                             if not i in self.__byteWatch:
                                 self.__byteWatch.append(i)
-                    break
 
     # dups descriptor in a readable form 
-    def dump_hid_descriptor(self, raw=False, report=False):
-        self.__descriptor.dump()
-        if raw: self.__descriptor.dump_raw()
-        if report: 
-            inputs = self.__inputs
-            for i in inputs:
-                print(i.fieldMap)
+    def dump_hid_descriptor(self, raw=False, writer=sys.stdout.write):
+        self.__hid_descriptor.dump(writer=writer)
+        if raw: self.__hid_descriptor.dump_raw(writer=writer)
+        if self.__debug:
+            writer("Input data mapping:\n")
+            for input in self.__inputReports:
+                for i in input.byteMap:
+                    for ud in input.byteMap[i]:
+                        usage, index, size, mask, shift = ud
+                        writer("  Usage: {}, Index: {}, Size: {}, Mask: {}, Shift: {}, Signed: {}\n".format(usage, index, size, mask, shift, input.readSigned))
     
     def get_state(self, usage):
-        if usage in self.__state:
-            return self.__state[usage]
+        # if isConstant and _udateTick > 0: no leer
+        if usage in self.__usageData:
+            s = self.__usageData[usage]
+            if self.__updateTick > s[3]:
+                s[0] = self.__read_usage(s[1],s[2])
+                s[3] = self.__updateTick
+            return s[0]
 
+    def __read_usage(self, input, usageDescriptor):
+        usage, start, size, mask, shift  = usageDescriptor
+        c = int.from_bytes(self.__currentState[start:start+size], byteorder="little", signed=True)
+        if mask: c = c & mask
+        if shift: c = c >> shift
+        if input.readSigned:
+            m, s = 2**input.reportSize-1, 2**(input.reportSize-1) # to byteMap?
+            c = ((c & m) ^ s) - s
+            c = input.compute(c)
+        return c
+
+    # TODO: Constant dont need reread
     def update(self, eventQueue):
-        if not self.__inputs:
+        if not self.__inputReports:
             return
         current = self.read(64)
         if len(current) == 0: return
+        # assert(len(current) >= self.__hid_descriptor.inputBitSize)
+        self.__updateTick += 1
         self.__lastState = self.__currentState
         self.__currentState = current 
         if len(self.__lastState) == 0: self.__lastState = current
-        # for i in range(min(len(self.__lastState), len(self.__currentState))):
-        for i in self.__byteWatch:
+        # Always update watching list looking for events
+        for i in self.__byteWatch: # we dont look for what dont need
             if self.__lastState[i] != self.__currentState[i]:
-                for input in self.__inputs:
-                    if i in input.fieldMap:
-                        fm = input.fieldMap[i]
-                        for f in fm:
-                            usage, start, size, mask, shift  = f
-                            if not usage in self.__usageWatch: continue
-                            l = int.from_bytes(self.__lastState[start:start+size], byteorder="little", signed=True)
-                            c = int.from_bytes(self.__currentState[start:start+size], byteorder="little", signed=True)
+                for input in self.__inputReports:
+                    if i in input.byteMap:
+                        uds = input.byteMap[i]
+                        for ud in uds:
+                            usage, start, size, mask, shift  = ud
+                            if not usage in self.__usageWatch: 
+                                continue
+                            l = int.from_bytes(self.__lastState[start:start+size], byteorder="little")
+                            c = int.from_bytes(self.__currentState[start:start+size], byteorder="little")
                             if mask:
                                 l = l & mask
                                 c = c & mask
@@ -87,12 +142,22 @@ class HidDevice(hid.Device):
                                 l = l >> shift
                                 c = c >> shift
                             if l != c:
-                                self.__state[usage] = input.compute(c)
-                                if type(usage) is str and "Button" in usage:
-                                    event = "{}{}".format("".join(usage.split()), "Pressed" if c else "Released")
-                                    eventQueue.append(event)
-                                    print(event)
+                                if input.readSigned:
+                                    m, s = 2**input.reportSize-1, 2**(input.reportSize-1) # to byteMap?
+                                    l = ((l & m) ^ s) - s
+                                    c = ((c & m) ^ s) - s
+                                c = input.compute(c)
+                                self.__usageData[usage][0] = c
+                                self.__usageData[usage][3] = self.__updateTick
+                                if self.__debug: print("New value: ", usage, c) # change to logging.debug?
+                                # events
+                                if input.usagePage == 0x09: # Buttons
+                                    if type(usage) is str and "Button" in usage:
+                                        event = "{}{}".format("".join(usage.split()), "Pressed" if c else "Released")
+                                        eventQueue.append(event)
 
+# A report for Hid Report Descriptor
+# All data fields defined in a single item share an identical data format
 class Report:
     def __init__(self, type):
         self.dataIndex = 0
@@ -103,48 +168,65 @@ class Report:
         self.explicitUsage = False
         self.usageMinimun = self.usageMaximun = None
         self.physicalMinimun = self.physicalMaximun = None
-        self.logicalMinimun = self.logicalMaximun = None
-        self.unit = self.unitExponent = None
+        self.logicalMinimun = self.logicalMaximun = 0
+        self.unit = None
+        self.unitExponent = 0
         self.designatorIndex = self.designatorMaximun = self.designatorMinimun = None
         self.stringIndex = self.stringMaximun = self.stringMinimun = None
+        self.resolution = 1
+        self.readSigned = True
         self.flags = 0
         self.done = False
         self.usage = []
         self.type = type
 
     def compute(self, rawVal):
-        return rawVal
+        # TODO
+        if self.flags & 0x02 == 0: # Array? so we report value readed
+            val = HidUtils.get_usage_name(self.usagePage, self.logicalMinimun + rawVal)
+        else: # Variable?
+            val = rawVal * self.resolution
+        return val
 
-    def build(self):
+    def build(self, arrayCount):
+        isArray = (self.flags & 0x02 == 0)
+        self.signedData = self.logicalMinimun is None or self.logicalMinimun < 0
+        # adds usage minimun -> maximun if available
         if not self.usageMinimun is None and not self.usageMaximun is None:
-            for i in range(self.usageMinimun, self.usageMaximun+1):
-                self.usage.append(HidUtils.get_usage_name(self.usagePage, i))
-        self.fieldMap = self.__get_field_map()
+            if isArray:
+                for i in range(self.reportCount):
+                    self.usage.append("Arr{}Val{}".format(arrayCount, i))
+            else:
+                for i in range(self.usageMinimun, self.usageMaximun+1):
+                    self.usage.append(HidUtils.get_usage_name(self.usagePage, i))
+        self.readSigned = self.logicalMinimun < 0
+        if not (self.physicalMaximun is None or self.physicalMinimun is None or (self.physicalMinimun == self.physicalMinimun == 0)):
+            self.resolution = (self.logicalMaximun - self.logicalMinimun) / ((self.physicalMaximun - self.physicalMinimun) * 10**self.unitExponent)
+        self.byteMap = self.__get_field_map()
 
     @property
-    def size(self):
+    def bitSize(self):
         return self.reportSize * self.reportCount
 
     def __get_field_map(self):
-        h = 0 # always at 1?
         hstart = self.dataIndex
         map = {}
         size = self.reportSize
         assert(size > 0)
         mask = 2**size - 1
+        # Only maps valid usages, anonymous are discarded
         for i in range(len(self.usage)):
             usage = self.usage[i]
-            start = hstart + i * size        # bit start in the bit field
-            end = start + size - 1  # bit end in the bit field
+            start = hstart + i * size   # bit start in the bit field
+            end = start + size - 1      # bit end in the bit field
             bstart = int(start/8)
             bend = int(end/8)
             shift = start % 8
             #       usage   index     size           mask            shift
-            field = (usage, h+bstart, bend-bstart+1, mask << shift, shift )
+            field = (usage, bstart, bend-bstart+1, mask << shift, shift )
             for byte in range(field[1], field[1]+field[2]):
                 if not byte in map: map[byte] = []
                 map[byte].append(field)
-
         return map
 
     def __checks(self):
@@ -165,82 +247,110 @@ class Item:
         self.tag = itemDesc[0]
         self.name = itemDesc[1]
         self.data = data 
-        self.collection = None # todo remove
         self.extended = extended
 
 # 5.2 Report Descriptors
-# 6.2.2 Report Descriptor of hid1_11
+# 6.2.2 Report Descriptors
+# A Hid Report Descriptor is a collection of Items
 class HidReportDescriptor:
     def __init__(self, raw_descriptor):
         utils = HidUtils()
         self.__raw = raw_descriptor
         self.__items = utils.itemizer(raw_descriptor)
-        self.__reports = [[]]*3 # Inputs, Outputs, Features
+        self.__hasReportId = False
+        self.__reports = [[]]*3 # Inputs, Outputs (ignored atm), Features (ignored atm)
         self.__buildReports()
 
     def items(self):
         return self.__items.copy()
 
+    @property
+    def inputBitSize(self):
+        return self.__inputBitSize
+
+    # parse items to Report (mostly Inputs from now)
+    # TODO Reports Ids
     def __buildReports(self):
         items = self.items()
-        dataIndex = 0
+        dataIndex = 0 if not self.__hasReportId else 8  # Data index in bits
         L = {"usage":[]}
         G = {}
         inputs = []
         G["usagePage"] = items[0].data
         L["usage"].append(items[1].data) # todo extended usage
+        arrayCount = 0
         h = 2
         while (h < len(items)):
             item = items[h]
             if not item.name is None:
                 if item.name == "usage":
-                    L["usage"].append(item.data)
+                    usage = HidUtils.get_usage_name(G["usagePage"], item.data)
+                    L["usage"].append(usage)
                 elif item.iType == Item.TYPE_GLOBAL:
                     G[item.name] = item.data
                 elif item.iType == Item.TYPE_LOCAL:
                     L[item.name] = item.data
             if item.iType == Item.TYPE_MAIN:
+                # atm only input are relevants
                 if item.tag == "Input":
                     report = Report(item.tag)
+                    report.flags = item.data
                     for g in G:
                         report.__setattr__(g, G[g])
                     for l in L:
                         report.__setattr__(l, L[l])
                     report.dataIndex = dataIndex
-                    report.build()
+                    report.build(arrayCount)
+                    if (report.flags & 0x02 == 0):
+                        arrayCount += 1 
+                    if not report.reportId is None:
+                        self.__hasReportId = True # meaning: 6.2.2.7 Global Items [Report ID]
                     inputs.append(report)
-                    dataIndex += report.size
+                    bitSize = report.bitSize
+                    # TODO where to fit the gap?
+                    # if bitSize % 8 != 0:
+                    #     bitSize = 8*(int(bitSize / 8)+1)
+                    dataIndex += bitSize
                 L = {"usage":[]}
             h += 1
+        self.__inputBitSize = dataIndex
         self.__reports[0] = inputs
 
     def inputs(self):
         return self.__reports[0].copy()
 
-    def dump(self):
+    def dump(self, writer=sys.stdout.write):
         depth = 0
         page = 0
+        colors = { Item.TYPE_GLOBAL: 91, Item.TYPE_LOCAL: 92, Item.TYPE_MAIN: 93 }
         for i in range(len(self.__items)):
             item = self.__items[i]
             if item.tag == "End of Collection": depth -= 1
             data = item.data
+            if item.tag == "Collection":
+                data = HidUtils.get_collection_name(data)
             if item.name == "usagePage": 
                 page = data
                 data = HidUtils.get_page_name(data)
-            if item.name == "usage": data = HidUtils.get_usage_name(page, data)
-            print("  "*depth, item.tag, "({})".format(data))
+            if item.tag in ["Input", "Output", "Feature"]:
+                data = HidUtils.get_flags_name(data, isInput=item.tag=="Input")
+            if item.name == "usage": data = HidUtils.get_usage_name(page, data, includePage=True)
+            if writer == sys.stdout.write:
+                writer("  "*depth+"\033[{}m{}\033[00m ({})\n".format(colors[item.iType], item.tag, data))
+            else:
+                writer("  "*depth+"{} ({})\n".format( item.tag, data))
             if item.tag == "Collection": depth += 1
 
-    def dump_raw(self):
+    def dump_raw(self, writer=sys.stdout.write):
         out = ""
         for b in self.__raw:
             out+= "0x{:02X} ".format(b)
-        print(out)
+        writer(out+'\n')
 
 
 # HID Utils
 class HidUtils:
-    # itemize a raw Hid Descriptor (byte array)
+    # itemize a raw Hid Descriptor (byte array) into tokens called items (hid glosary)
     def itemizer(self, descriptor):
         self.__d = descriptor
         self.__h = 0
@@ -255,11 +365,13 @@ class HidUtils:
     def __head(self):
         return self.__d[self.__h]
     
+    # Parse bytes to hid descriptor Item
     # NOTE: Only Short Items are available for now (6.2.2.2 Short Items)
+    # NOTE2: For reading we use little indian (5.8 Format of Multibyte Numeric Values)
     def __parse_entry(self, prefix):
         # 5.3 Generic Item Format
         bTag = prefix & 0xFC
-        # if bTag == 0xFC: -> Long Item
+        # if bTag == 0xFC: -> Long Item TODO
         bType = prefix & 0x0C
         M = bType == 0x00 # Main item
         G = bType == 0x04 # Global item
@@ -271,56 +383,78 @@ class HidUtils:
             self.__h += 1
             return Item(prefix, None, self.__ENTRIES[bTag])
         payload = self.__d[self.__h+1:self.__h+s+1]
-        if M or L: signed = False # All Local items are unsigned integers.
+        if M or L: signed = False # All Local and Main items are unsigned integers.
         elif bTag in [0x04, 0x74, 0x84, 0x94 ]: signed = False
         else: signed = True
         self.__h += s+1
         data = int.from_bytes(payload, byteorder='little', signed=signed)
         if bTag == 0x04: # Usage Page
             self.__page = data
-            # data = HidUtils.get_page_name(self.__page)
         elif bTag == 0x08: # Usage
             if s == 4:
                 # 3.1 HID Usage Table Conventions of Hut documentation
                 self.__page = (data & 0xFFFF0000) >> 16
                 data = data & 0x0000FFFF
-                pass
-            # data = HidUtils.get_usage_name(self.__page, data)
-        elif bTag == 0xA0 and data in self.__COLLECTIONS:
-            data = self.__COLLECTIONS[data]
-        elif bTag in [0x80, 0x90, 0xB9]:
-            flags = []
-            for iflag in self.__IOF_FLAGS:
-                if bTag == 0x80 and iflag == 0x80: continue # reserved in Inputs
-                flags.append(self.__IOF_FLAGS[iflag][1 if iflag & data else 0])
-            data = ", ".join(flags)
         return Item(prefix, data, self.__ENTRIES[bTag])
+
+    # return devices in a hidutils form
+    def get_devices(self):
+        devices = {}
+        for device in hid.enumerate():
+            id = f"0x{device['vendor_id']:04x}:0x{device['product_id']:04x} {device['product_string']}" 
+            if id in devices:
+                hiddevice = devices[id]
+            else:
+                hiddevice = devices[id] = {'usages': [], 'path': []}
+            for attrib in ['vendor_id', 'product_id', 'product_string', 'serial_number', 'manufacturer_string', 'interface_number', 'bus_type']:
+                hiddevice[attrib] = device[attrib]
+            hiddevice['usages'].append(HidUtils.get_usage_name(device['usage_page'], device['usage']))
+            hiddevice['path'].append(device['path'].decode('utf-8'))
+        return devices
 
     @staticmethod
     def get_page_name(page):
         if page in HidUtils.__PAGES:
             page = HidUtils.__PAGES[page]
-        elif page > 0xFF00 and page <= 0xFFFF:
+        elif page >= 0xFF00 and page <= 0xFFFF:
             page = "User Defined ({})".format("0x{:04X}".format(page))
         else:
-            raise Exception("Bad Page: {}".format(page))
+            raise Exception("Bad Page: 0x{:04X}".format(page))
         return page
 
-
     @staticmethod
-    def get_usage_name(page, usage):
+    def get_usage_name(page, usage, includePage=False):
         if page in HidUtils.__USAGES and usage in HidUtils.__USAGES[page]: 
             usage = HidUtils.__USAGES[page][usage]
         elif page == 0x09 and usage >= 0 and usage <= 65535:
-            usage = "Button"+str(usage) if usage > 0 else "No Button Pressed"
+            usage = "Button "+str(usage) if usage > 0 else "No Button Pressed"
         elif page == 0x0A  and usage > 0 and usage <= 65535:
-            usage = "Instance"+str(usage)
+            usage = "Instance "+str(usage)
         elif page == 0x81 and usage > 0 and usage <= 65535:
-            usage = "Enum"+str(usage)
+            usage = "Enum "+str(usage)
         else:
-            usage = "Unknown"
-        return usage
+            usage = "Unknown(0x{:02X}:0x{:02X})".format(page, usage)
+            includePage = False # dont add page again
+        if includePage:
+            return "{}[{}]".format(HidUtils.get_page_name(page), usage)
+        else:
+            return usage
 
+    @staticmethod
+    def get_collection_name(collection):
+        return HidUtils.__COLLECTIONS[collection]
+    
+    @staticmethod
+    def get_flags_name(flags, isInput=False):
+         name = []
+         isArray = (flags & 0x02 == 0)
+         for flag in HidUtils.__IOF_FLAGS:
+             if isInput:
+                 if isArray and flag >= 0x08: continue
+                 if flag == 0x80: continue # reserved in Inputs
+             name.append(HidUtils.__IOF_FLAGS[flag][1 if flag & flags else 0])
+         return ", ".join(name)
+ 
 
     # Indices are for  Device Class Definition for Human Interface Devices (HID) Version 1.11  
     __ENTRIES = {
@@ -692,63 +826,65 @@ class HidUtils:
             0x41: "Pointer Pose Offset",
         },
         0x07 : {
+                # shome changes from HUT here
+                0x00: "0x00",
                 0x01: "Keyboard ErrorRollOver",
                 0x02: "Keyboard POSTFail",
                 0x03: "Keyboard ErrorUndefined",
-                0x04: "Keyboard a and A",
-                0x05: "Keyboard b and B",
-                0x06: "Keyboard c and C",
-                0x07: "Keyboard d and D",
-                0x08: "Keyboard e and E",
-                0x09: "Keyboard f and F",
-                0x0A: "Keyboard g and G",
-                0x0B: "Keyboard h and H",
-                0x0C: "Keyboard i and I",
-                0x0D: "Keyboard j and J",
-                0x0E: "Keyboard k and K",
-                0x0F: "Keyboard l and L",
-                0x10: "Keyboard m and M",
-                0x11: "Keyboard n and N",
-                0x12: "Keyboard o and O",
-                0x13: "Keyboard p and P",
-                0x14: "Keyboard q and Q",
-                0x15: "Keyboard r and R",
-                0x16: "Keyboard s and S",
-                0x17: "Keyboard t and T",
-                0x18: "Keyboard u and U",
-                0x19: "Keyboard v and V",
-                0x1A: "Keyboard w and W2",
-                0x1B: "Keyboard x and X",
-                0x1C: "Keyboard y and Y",
-                0x1D: "Keyboard z and Z",
-                0x1E: "Keyboard 1 and !",
-                0x1F: "Keyboard 2 and @",
-                0x20: "Keyboard 3 and #",
-                0x21: "Keyboard 4 and $",
-                0x22: "Keyboard 5 and %",
-                0x23: "Keyboard 6 and ∧",
-                0x24: "Keyboard 7 and &",
-                0x25: "Keyboard 8 and *",
-                0x26: "Keyboard 9 and (",
-                0x27: "Keyboard 0 and )",
-                0x28: "Keyboard Return (ENTER)3",
+                0x04: "Keyboard A",
+                0x05: "Keyboard B",
+                0x06: "Keyboard C",
+                0x07: "Keyboard D",
+                0x08: "Keyboard E",
+                0x09: "Keyboard F",
+                0x0A: "Keyboard G",
+                0x0B: "Keyboard H",
+                0x0C: "Keyboard I",
+                0x0D: "Keyboard J",
+                0x0E: "Keyboard K",
+                0x0F: "Keyboard L",
+                0x10: "Keyboard M",
+                0x11: "Keyboard N",
+                0x12: "Keyboard O",
+                0x13: "Keyboard P",
+                0x14: "Keyboard Q",
+                0x15: "Keyboard R",
+                0x16: "Keyboard S",
+                0x17: "Keyboard T",
+                0x18: "Keyboard U",
+                0x19: "Keyboard V",
+                0x1A: "Keyboard W",
+                0x1B: "Keyboard X",
+                0x1C: "Keyboard Y",
+                0x1D: "Keyboard Z",
+                0x1E: "Keyboard 1",
+                0x1F: "Keyboard 2",
+                0x20: "Keyboard 3",
+                0x21: "Keyboard 4",
+                0x22: "Keyboard 5",
+                0x23: "Keyboard 6",
+                0x24: "Keyboard 7",
+                0x25: "Keyboard 8",
+                0x26: "Keyboard 9",
+                0x27: "Keyboard 0",
+                0x28: "Keyboard ENTER",
                 0x29: "Keyboard ESCAPE",
-                0x2A: "Keyboard DELETE (Backspace)4",
-                0x2B: "Keyboard Tab",
-                0x2C: "Keyboard Spacebar",
-                0x2D: "Keyboard - and _",
-                0x2E: "Keyboard = and +",
-                0x2F: "Keyboard [ and {",
-                0x30: "Keyboard ] and }",
-                0x31: "Keyboard \\ and |",
-                0x32: "Keyboard Non-US # and ˜",
-                0x33: "Keyboard ; and :",
-                0x34: "Keyboard ' and \"",
-                0x35: "Keyboard Grave Accent and Tilde2",
-                0x36: "Keyboard , and <",
-                0x37: "Keyboard . and >",
+                0x2A: "Keyboard BACKSPACE",
+                0x2B: "Keyboard TAB",
+                0x2C: "Keyboard SPACEBAR",
+                0x2D: "Keyboard -",
+                0x2E: "Keyboard =",
+                0x2F: "Keyboard [",
+                0x30: "Keyboard ]",
+                0x31: "Keyboard \\",
+                0x32: "Keyboard #",
+                0x33: "Keyboard ;",
+                0x34: "Keyboard '",
+                0x35: "Keyboard Grave Accent",
+                0x36: "Keyboard ,",
+                0x37: "Keyboard .",
                 0x38: "Keyboard and ?",
-                0x39: "Keyboard Caps Lock6",
+                0x39: "Keyboard CAPSLOCK",
                 0x3A: "Keyboard F1",
                 0x3B: "Keyboard F2",
                 0x3C: "Keyboard F3",
@@ -763,35 +899,35 @@ class HidUtils:
                 0x45: "Keyboard F12",
                 0x46: "Keyboard PrintScreen",
                 0x47: "Keyboard Scroll Lock",
-                0x48: "Keyboard Pause",
-                0x49: "Keyboard Insert",
-                0x4A: "Keyboard Home",
-                0x4B: "Keyboard PageUp",
-                0x4C: "Keyboard Delete Forward,8",
-                0x4D: "Keyboard End",
-                0x4E: "Keyboard PageDown",
+                0x48: "Keyboard PAUSE",
+                0x49: "Keyboard INSERT",
+                0x4A: "Keyboard HOME",
+                0x4B: "Keyboard PAGEUP",
+                0x4C: "Keyboard DELETE",
+                0x4D: "Keyboard END",
+                0x4E: "Keyboard PAGEDOWN",
                 0x4F: "Keyboard RightArrow",
                 0x50: "Keyboard LeftArrow",
                 0x51: "Keyboard DownArrow",
                 0x52: "Keyboard UpArrow",
-                0x53: "Keypad Num Lock and Clear",
+                0x53: "Keypad Num Lock",
                 0x54: "Keypad",
                 0x55: "Keypad *",
                 0x56: "Keypad -",
                 0x57: "Keypad +",
                 0x58: "Keypad ENTER",
-                0x59: "Keypad 1 and End",
-                0x5A: "Keypad 2 and Down Arrow",
-                0x5B: "Keypad 3 and PageDn",
-                0x5C: "Keypad 4 and Left Arrow",
+                0x59: "Keypad 1",
+                0x5A: "Keypad 2",
+                0x5B: "Keypad 3",
+                0x5C: "Keypad 4",
                 0x5D: "Keypad 5",
-                0x5E: "Keypad 6 and Right Arrow",
-                0x5F: "Keypad 7 and Home",
-                0x60: "Keypad 8 and Up Arrow",
-                0x61: "Keypad 9 and PageUp",
-                0x62: "Keypad 0 and Insert",
-                0x63: "Keypad . and Delete",
-                0x64: "Keyboard Non-US \and |",
+                0x5E: "Keypad 6",
+                0x5F: "Keypad 7",
+                0x60: "Keypad 8",
+                0x61: "Keypad 9",
+                0x62: "Keypad 0",
+                0x63: "Keypad .",
+                0x64: "Keyboard \\",
                 0x65: "Keyboard Application",
                 0x66: "Keyboard Power",
                 0x67: "Keypad =",
@@ -825,441 +961,7 @@ class HidUtils:
                 0x83: "Keyboard Locking Num Lock",
                 0x84: "Keyboard Locking Scroll Lock",
                 0x85: "Keypad Comma",
-                0x86: "Keypad Equal Sign",
-                0x87: "Keyboard International1",
-                0x88: "Keyboard International2",
-                0x89: "Keyboard International3",
-                0x8A: "Keyboard International4",
-                0x8B: "Keyboard International5",
-                0x8C: "Keyboard International6",
-                0x8D: "Keyboard International7",
-                0x8E: "Keyboard International8",
-                0x8F: "Keyboard International9",
-                0x90: "Keyboard LANG1",
-                0x91: "Keyboard LANG2",
-                0x92: "Keyboard LANG3",
-                0x93: "Keyboard LANG4",
-                0x94: "Keyboard LANG5",
-                0x95: "Keyboard LANG6",
-                0x96: "Keyboard LANG7",
-                0x97: "Keyboard LANG8",
-                0x98: "Keyboard LANG9",
-                0x99: "Keyboard Alternate Erase",
-                0x9A: "Keyboard SysReq Attention",
-                0x9B: "Keyboard Cancel",
-                0x9C: "Keyboard Clear",
-                0x9D: "Keyboard Prior",
-                0x9E: "Keyboard Return",
-                0x9F: "Keyboard Separator",
-                0xA0: "Keyboard Out",
-                0xA1: "Keyboard Oper",
-                0xA2: "Keyboard Clear Again",
-                0xA3: "Keyboard CrSel Props",
-                0xA4: "Keyboard ExSel",
-                0xB0: "Keypad 00",
-                0xB1: "Keypad 000",
-                0xB2: "Thousands Separator",
-                0xB3: "Decimal Separator",
-                0xB4: "Currency Unit",
-                0xB5: "Currency Sub-unit",
-                0xB6: "Keypad (",
-                0xB7: "Keypad )",
-                0xB8: "Keypad {",
-                0xB9: "Keypad }",
-                0xBA: "Keypad Tab",
-                0xBB: "Keypad Backspace",
-                0xBC: "Keypad A",
-                0xBD: "Keypad B",
-                0xBE: "Keypad C",
-                0xBF: "Keypad D",
-                0xC0: "Keypad E",
-                0xC1: "Keypad F",
-                0xC2: "Keypad XOR",
-                0xC3: "Keypad ∧",
-                0xC4: "Keypad %",
-                0xC5: "Keypad <",
-                0xC6: "Keypad >",
-                0xC7: "Keypad &",
-                0xC8: "Keypad &&",
-                0xC9: "Keypad |",
-                0xCA: "Keypad ||",
-                0xCB: "Keypad :",
-                0xCC: "Keypad #",
-                0xCD: "Keypad Space",
-                0xCE: "Keypad @",
-                0xCF: "Keypad !",
-                0xD0: "Keypad Memory Store",
-                0xD1: "Keypad Memory Recall",
-                0xD2: "Keypad Memory Clear",
-                0xD3: "Keypad Memory Add",
-                0xD4: "Keypad Memory Subtract",
-                0xD5: "Keypad Memory Multiply",
-                0xD6: "Keypad Memory Divide",
-                0xD7: "Keypad + -",
-                0xD8: "Keypad Clear",
-                0xD9: "Keypad Clear Entry",
-                0xDA: "Keypad Binary",
-                0xDB: "Keypad Octal",
-                0xDC: "Keypad Decimal",
-                0xDD: "Keypad Hexadecimal",
-                0xE0: "Keyboard LeftControl",
-                0xE1: "Keyboard LeftShift",
-                0xE2: "Keyboard LeftAlt",
-                0xE3: "Keyboard Left GUI",
-                0xE4: "Keyboard RightControl",
-                0xE5: "Keyboard RightShift",
-                0xE6: "Keyboard RightAlt",
-                0xE7: "Keyboard Right GUI",
-                0x02: "Keyboard POSTFail",
-                0x03: "Keyboard ErrorUndefined",
-                0x04: "Keyboard a and A",
-                0x05: "Keyboard b and B",
-                0x06: "Keyboard c and C",
-                0x07: "Keyboard d and D",
-                0x08: "Keyboard e and E",
-                0x09: "Keyboard f and F",
-                0x0A: "Keyboard g and G",
-                0x0B: "Keyboard h and H",
-                0x0C: "Keyboard i and I",
-                0x0D: "Keyboard j and J",
-                0x0E: "Keyboard k and K",
-                0x0F: "Keyboard l and L",
-                0x10: "Keyboard m and M",
-                0x11: "Keyboard n and N",
-                0x12: "Keyboard o and O",
-                0x13: "Keyboard p and P",
-                0x14: "Keyboard q and Q",
-                0x15: "Keyboard r and R",
-                0x16: "Keyboard s and S",
-                0x17: "Keyboard t and T",
-                0x18: "Keyboard u and U",
-                0x19: "Keyboard v and V",
-                0x1A: "Keyboard w and W2",
-                0x1B: "Keyboard x and X",
-                0x1C: "Keyboard y and Y",
-                0x1D: "Keyboard z and Z",
-                0x1E: "Keyboard 1 and !",
-                0x1F: "Keyboard 2 and @",
-                0x20: "Keyboard 3 and #",
-                0x21: "Keyboard 4 and $",
-                0x22: "Keyboard 5 and %",
-                0x23: "Keyboard 6 and ∧",
-                0x24: "Keyboard 7 and &",
-                0x25: "Keyboard 8 and *",
-                0x26: "Keyboard 9 and (",
-                0x27: "Keyboard 0 and )",
-                0x28: "Keyboard Return (ENTER)3",
-                0x29: "Keyboard ESCAPE",
-                0x2A: "Keyboard DELETE (Backspace)4",
-                0x2B: "Keyboard Tab",
-                0x2C: "Keyboard Spacebar",
-                0x2D: "Keyboard - and _",
-                0x2E: "Keyboard = and +",
-                0x2F: "Keyboard [ and {",
-                0x30: "Keyboard ] and }",
-                0x31: "Keyboard \\ and |",
-                0x32: "Keyboard Non-US # and ˜",
-                0x33: "Keyboard ; and :",
-                0x34: "Keyboard ' and \"",
-                0x35: "Keyboard Grave Accent and Tilde2",
-                0x36: "Keyboard , and <",
-                0x37: "Keyboard . and >",
-                0x38: "Keyboard and ?",
-                0x39: "Keyboard Caps Lock6",
-                0x3A: "Keyboard F1",
-                0x3B: "Keyboard F2",
-                0x3C: "Keyboard F3",
-                0x3D: "Keyboard F4",
-                0x3E: "Keyboard F5",
-                0x3F: "Keyboard F6",
-                0x40: "Keyboard F7",
-                0x41: "Keyboard F8",
-                0x42: "Keyboard F9",
-                0x43: "Keyboard F10",
-                0x44: "Keyboard F11",
-                0x45: "Keyboard F12",
-                0x46: "Keyboard PrintScreen",
-                0x47: "Keyboard Scroll Lock",
-                0x48: "Keyboard Pause",
-                0x49: "Keyboard Insert",
-                0x4A: "Keyboard Home",
-                0x4B: "Keyboard PageUp",
-                0x4C: "Keyboard Delete Forward,8",
-                0x4D: "Keyboard End",
-                0x4E: "Keyboard PageDown",
-                0x4F: "Keyboard RightArrow",
-                0x50: "Keyboard LeftArrow",
-                0x51: "Keyboard DownArrow",
-                0x52: "Keyboard UpArrow",
-                0x53: "Keypad Num Lock and Clear",
-                0x54: "Keypad",
-                0x55: "Keypad *",
-                0x56: "Keypad -",
-                0x57: "Keypad +",
-                0x58: "Keypad ENTER",
-                0x59: "Keypad 1 and End",
-                0x5A: "Keypad 2 and Down Arrow",
-                0x5B: "Keypad 3 and PageDn",
-                0x5C: "Keypad 4 and Left Arrow",
-                0x5D: "Keypad 5",
-                0x5E: "Keypad 6 and Right Arrow",
-                0x5F: "Keypad 7 and Home",
-                0x60: "Keypad 8 and Up Arrow",
-                0x61: "Keypad 9 and PageUp",
-                0x62: "Keypad 0 and Insert",
-                0x63: "Keypad . and Delete",
-                0x64: "Keyboard Non-US \and |",
-                0x65: "Keyboard Application",
-                0x66: "Keyboard Power",
-                0x67: "Keypad =",
-                0x68: "Keyboard F13",
-                0x69: "Keyboard F14",
-                0x6A: "Keyboard F15",
-                0x6B: "Keyboard F16",
-                0x6C: "Keyboard F17",
-                0x6D: "Keyboard F18",
-                0x6E: "Keyboard F19",
-                0x6F: "Keyboard F20",
-                0x70: "Keyboard F21",
-                0x71: "Keyboard F22",
-                0x72: "Keyboard F23",
-                0x73: "Keyboard F24",
-                0x74: "Keyboard Execute",
-                0x75: "Keyboard Help",
-                0x76: "Keyboard Menu",
-                0x77: "Keyboard Select",
-                0x78: "Keyboard Stop",
-                0x79: "Keyboard Again",
-                0x7A: "Keyboard Undo",
-                0x7B: "Keyboard Cut",
-                0x7C: "Keyboard Copy",
-                0x7D: "Keyboard Paste",
-                0x7E: "Keyboard Find",
-                0x7F: "Keyboard Mute",
-                0x80: "Keyboard Volume Up",
-                0x81: "Keyboard Volume Down",
-                0x82: "Keyboard Locking Caps Lock",
-                0x83: "Keyboard Locking Num Lock",
-                0x84: "Keyboard Locking Scroll Lock",
-                0x85: "Keypad Comma",
-                0x86: "Keypad Equal Sign",
-                0x87: "Keyboard International1",
-                0x88: "Keyboard International2",
-                0x89: "Keyboard International3",
-                0x8A: "Keyboard International4",
-                0x8B: "Keyboard International5",
-                0x8C: "Keyboard International6",
-                0x8D: "Keyboard International7",
-                0x8E: "Keyboard International8",
-                0x8F: "Keyboard International9",
-                0x90: "Keyboard LANG1",
-                0x91: "Keyboard LANG2",
-                0x92: "Keyboard LANG3",
-                0x93: "Keyboard LANG4",
-                0x94: "Keyboard LANG5",
-                0x95: "Keyboard LANG6",
-                0x96: "Keyboard LANG7",
-                0x97: "Keyboard LANG8",
-                0x98: "Keyboard LANG9",
-                0x99: "Keyboard Alternate Erase",
-                0x9A: "Keyboard SysReq Attention",
-                0x9B: "Keyboard Cancel",
-                0x9C: "Keyboard Clear",
-                0x9D: "Keyboard Prior",
-                0x9E: "Keyboard Return",
-                0x9F: "Keyboard Separator",
-                0xA0: "Keyboard Out",
-                0xA1: "Keyboard Oper",
-                0xA2: "Keyboard Clear Again",
-                0xA3: "Keyboard CrSel Props",
-                0xA4: "Keyboard ExSel",
-                0xB0: "Keypad 00",
-                0xB1: "Keypad 000",
-                0xB2: "Thousands Separator",
-                0xB3: "Decimal Separator",
-                0xB4: "Currency Unit",
-                0xB5: "Currency Sub-unit",
-                0xB6: "Keypad (",
-                0xB7: "Keypad )",
-                0xB8: "Keypad {",
-                0xB9: "Keypad }",
-                0xBA: "Keypad Tab",
-                0xBB: "Keypad Backspace",
-                0xBC: "Keypad A",
-                0xBD: "Keypad B",
-                0xBE: "Keypad C",
-                0xBF: "Keypad D",
-                0xC0: "Keypad E",
-                0xC1: "Keypad F",
-                0xC2: "Keypad XOR",
-                0xC3: "Keypad ∧",
-                0xC4: "Keypad %",
-                0xC5: "Keypad <",
-                0xC6: "Keypad >",
-                0xC7: "Keypad &",
-                0xC8: "Keypad &&",
-                0xC9: "Keypad |",
-                0xCA: "Keypad ||",
-                0xCB: "Keypad :",
-                0xCC: "Keypad #",
-                0xCD: "Keypad Space",
-                0xCE: "Keypad @",
-                0xCF: "Keypad !",
-                0xD0: "Keypad Memory Store",
-                0xD1: "Keypad Memory Recall",
-                0xD2: "Keypad Memory Clear",
-                0xD3: "Keypad Memory Add",
-                0xD4: "Keypad Memory Subtract",
-                0xD5: "Keypad Memory Multiply",
-                0xD6: "Keypad Memory Divide",
-                0xD7: "Keypad + -",
-                0xD8: "Keypad Clear",
-                0xD9: "Keypad Clear Entry",
-                0xDA: "Keypad Binary",
-                0xDB: "Keypad Octal",
-                0xDC: "Keypad Decimal",
-                0xDD: "Keypad Hexadecimal",
-                0xE0: "Keyboard LeftControl",
-                0xE1: "Keyboard LeftShift",
-                0xE2: "Keyboard LeftAlt",
-                0xE3: "Keyboard Left GUI",
-                0xE4: "Keyboard RightControl",
-                0xE5: "Keyboard RightShift",
-                0xE6: "Keyboard RightAlt",
-                0xE7: "Keyboard Right GUI",
-                0x02: "Keyboard POSTFail",
-                0x03: "Keyboard ErrorUndefined",
-                0x04: "Keyboard a and A",
-                0x05: "Keyboard b and B",
-                0x06: "Keyboard c and C",
-                0x07: "Keyboard d and D",
-                0x08: "Keyboard e and E",
-                0x09: "Keyboard f and F",
-                0x0A: "Keyboard g and G",
-                0x0B: "Keyboard h and H",
-                0x0C: "Keyboard i and I",
-                0x0D: "Keyboard j and J",
-                0x0E: "Keyboard k and K",
-                0x0F: "Keyboard l and L",
-                0x10: "Keyboard m and M",
-                0x11: "Keyboard n and N",
-                0x12: "Keyboard o and O",
-                0x13: "Keyboard p and P",
-                0x14: "Keyboard q and Q",
-                0x15: "Keyboard r and R",
-                0x16: "Keyboard s and S",
-                0x17: "Keyboard t and T",
-                0x18: "Keyboard u and U",
-                0x19: "Keyboard v and V",
-                0x1A: "Keyboard w and W2",
-                0x1B: "Keyboard x and X",
-                0x1C: "Keyboard y and Y",
-                0x1D: "Keyboard z and Z",
-                0x1E: "Keyboard 1 and !",
-                0x1F: "Keyboard 2 and @",
-                0x20: "Keyboard 3 and #",
-                0x21: "Keyboard 4 and $",
-                0x22: "Keyboard 5 and %",
-                0x23: "Keyboard 6 and ∧",
-                0x24: "Keyboard 7 and &",
-                0x25: "Keyboard 8 and *",
-                0x26: "Keyboard 9 and (",
-                0x27: "Keyboard 0 and )",
-                0x28: "Keyboard Return (ENTER)3",
-                0x29: "Keyboard ESCAPE",
-                0x2A: "Keyboard DELETE (Backspace)4",
-                0x2B: "Keyboard Tab",
-                0x2C: "Keyboard Spacebar",
-                0x2D: "Keyboard - and _",
-                0x2E: "Keyboard = and +",
-                0x2F: "Keyboard [ and {",
-                0x30: "Keyboard ] and }",
-                0x31: "Keyboard \\ and |",
-                0x32: "Keyboard Non-US # and ˜",
-                0x33: "Keyboard ; and :",
-                0x34: "Keyboard ' and \"",
-                0x35: "Keyboard Grave Accent and Tilde2",
-                0x36: "Keyboard , and <",
-                0x37: "Keyboard . and >",
-                0x38: "Keyboard and ?",
-                0x39: "Keyboard Caps Lock6",
-                0x3A: "Keyboard F1",
-                0x3B: "Keyboard F2",
-                0x3C: "Keyboard F3",
-                0x3D: "Keyboard F4",
-                0x3E: "Keyboard F5",
-                0x3F: "Keyboard F6",
-                0x40: "Keyboard F7",
-                0x41: "Keyboard F8",
-                0x42: "Keyboard F9",
-                0x43: "Keyboard F10",
-                0x44: "Keyboard F11",
-                0x45: "Keyboard F12",
-                0x46: "Keyboard PrintScreen",
-                0x47: "Keyboard Scroll Lock",
-                0x48: "Keyboard Pause",
-                0x49: "Keyboard Insert",
-                0x4A: "Keyboard Home",
-                0x4B: "Keyboard PageUp",
-                0x4C: "Keyboard Delete Forward,8",
-                0x4D: "Keyboard End",
-                0x4E: "Keyboard PageDown",
-                0x4F: "Keyboard RightArrow",
-                0x50: "Keyboard LeftArrow",
-                0x51: "Keyboard DownArrow",
-                0x52: "Keyboard UpArrow",
-                0x53: "Keypad Num Lock and Clear",
-                0x54: "Keypad",
-                0x55: "Keypad *",
-                0x56: "Keypad -",
-                0x57: "Keypad +",
-                0x58: "Keypad ENTER",
-                0x59: "Keypad 1 and End",
-                0x5A: "Keypad 2 and Down Arrow",
-                0x5B: "Keypad 3 and PageDn",
-                0x5C: "Keypad 4 and Left Arrow",
-                0x5D: "Keypad 5",
-                0x5E: "Keypad 6 and Right Arrow",
-                0x5F: "Keypad 7 and Home",
-                0x60: "Keypad 8 and Up Arrow",
-                0x61: "Keypad 9 and PageUp",
-                0x62: "Keypad 0 and Insert",
-                0x63: "Keypad . and Delete",
-                0x64: "Keyboard Non-US \\ and |",
-                0x65: "Keyboard Application",
-                0x66: "Keyboard Power",
-                0x67: "Keypad =",
-                0x68: "Keyboard F13",
-                0x69: "Keyboard F14",
-                0x6A: "Keyboard F15",
-                0x6B: "Keyboard F16",
-                0x6C: "Keyboard F17",
-                0x6D: "Keyboard F18",
-                0x6E: "Keyboard F19",
-                0x6F: "Keyboard F20",
-                0x70: "Keyboard F21",
-                0x71: "Keyboard F22",
-                0x72: "Keyboard F23",
-                0x73: "Keyboard F24",
-                0x74: "Keyboard Execute",
-                0x75: "Keyboard Help",
-                0x76: "Keyboard Menu",
-                0x77: "Keyboard Select",
-                0x78: "Keyboard Stop",
-                0x79: "Keyboard Again",
-                0x7A: "Keyboard Undo",
-                0x7B: "Keyboard Cut",
-                0x7C: "Keyboard Copy",
-                0x7D: "Keyboard Paste",
-                0x7E: "Keyboard Find",
-                0x7F: "Keyboard Mute",
-                0x80: "Keyboard Volume Up",
-                0x81: "Keyboard Volume Down",
-                0x82: "Keyboard Locking Caps Lock",
-                0x83: "Keyboard Locking Num Lock",
-                0x84: "Keyboard Locking Scroll Lock",
-                0x85: "Keypad Comma",
-                0x86: "Keypad Equal Sign",
+                0x86: "Keypad Equal",
                 0x87: "Keyboard International1",
                 0x88: "Keyboard International2",
                 0x89: "Keyboard International3",
@@ -3695,5 +3397,16 @@ class HidUtils:
             0x80 : ("Non Volatile", "Volatile"),
             0x100 : ("Bit Field", "Buffered Bytes"),
     }
+    __UT_DATA_Sel = 1, "Selector", [(0x02, 0)]
+    __UT_DATA_SV = 2, "Static Value", [(0x01,1),(0x02,1),(0x03,0)]
+    __UT_DATA_SF = 3, "Static Flag", [(0x01,1),(0x02,1),(0x03,0)]
+    __UT_DATA_DV = 4, "Dynamic Value", [(0x01,0),(0x02,1),(0x03,0)]
+    __UT_DATA_DF = 5, "Dynamic Flag", [(0x01,0),(0x02,1),(0x03,0)]
+    __UT_NAry = 1, "Named Array", "Logical"
+    __UT_CA = 2, "Application Collection", "Application"
+    __UT_CL = 3, "Logical Collection", "Logical"
+    __UT_CP = 4, "Physical Collection", "Physical"
+    __UT_US = 5, "Usage Switch", "Logical"
+    __UT_UM = 6, "Usage Modifier", "Logical"
 
 
