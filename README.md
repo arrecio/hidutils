@@ -36,7 +36,47 @@ hiddevice = hidutils.HidDevice(0x0123, 0xABCD)
 hiddevice.dump_hid_descriptor() # shows the Hid Descriptor of the device
 ```
 
-Add `debug=True` argument in HidDevice constructor to see data input changes.
+My R.A.T.Z mouse reports something like this:
+
+```
+Usage Page (Generic Desktop Page (0x01))
+Usage (Generic Desktop Page (0x01)[Mouse])
+Collection (Application)
+  Usage (Generic Desktop Page (0x01)[Pointer])
+  Collection (Physical)
+    Usage Page (Button Page (0x09))
+    Usage Minimun (1)
+    Usage Maximun (13)
+    Logical Minimun (0)
+    Logical Maximun (1)
+    Report Size (1)
+    Report Count (13)
+    Input (Data, Variable, Absolute, No Wrap, Linear, Preferred State, No Null position, Bit Field)
+    Report Size (1)
+    Report Count (3)
+    Input (Constant, Array, Absolute)
+    Usage Page (Generic Desktop Page (0x01))
+    Usage (Generic Desktop Page (0x01)[X])
+    Usage (Generic Desktop Page (0x01)[Y])
+    Logical Minimun (-32768)
+    Logical Maximun (32767)
+    Report Size (16)
+    Report Count (2)
+    Input (Data, Variable, Relative, No Wrap, Linear, Preferred State, No Null position, Bit Field)
+    Usage (Generic Desktop Page (0x01)[Wheel])
+    Logical Minimun (-128)
+    Logical Maximun (127)
+    Report Size (8)
+    Report Count (1)
+    Input (Data, Variable, Relative, No Wrap, Linear, Preferred State, No Null position, Bit Field)
+  End of Collection (None)
+End of Collection (None)
+```
+
+At first, this information might seem overwhelming, but the documentation is quite good—I encourage you to learn on your own.
+
+> [!NOTE]
+> Add `debug=True` argument in HidDevice constructor to see data input changes.
 
 ### Watching events and look for data
 
