@@ -51,6 +51,7 @@ class HidDevice(hid.Device):
             for i in self.__inputUsage:
                  self.watch(i)
 
+    # TODO split-join first?
     # def __getattr__(self, name: str):
     #     return self.__state[name]
 
@@ -184,9 +185,7 @@ class HidDeviceManager:
         self.__onUnplug = onUnplug
 
 
-    def open(self, path, debug=False):
-        # we are using path for open devices
-        # opening 2xpaths for same divice...
+    def open(self, path, debug=False): 
         if path in self.__open_devices:
             return self.__open_devices[path]
 
@@ -228,14 +227,15 @@ class HidDeviceManager:
     def setAction(self, event, actionName):
         self.__actions[event] = actionName
 
-    def update(self):
+    def update(self, onEvent=None):
         self.__look_for_new_devices()
         queue = []
         for path,device in self.__open_devices.items():
             device.update(queue)
-        for event in queue:
-            # TODO
-            pass
+            for event in queue:
+                if callable(onEvent):
+                    onEvent(device, event)
+            queue.clear()
 
 
 # A report for Hid Report Descriptor
