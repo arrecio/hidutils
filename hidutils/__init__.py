@@ -4,6 +4,8 @@ import sys
 import hid
 import logging
 
+__all__ = ["HidDevice", "HidDeviceManager", "HidUtils"]
+
 # HidDevice class
 # encapsulates a hid.Device class.
 #
@@ -24,11 +26,12 @@ import logging
 # to X, Y, Z, Rx, Ry, Rz or Slider usages.
 #
 class HidDevice(hid.Device):
-    def __init__(self, vendorId, productId, debug=False):
-        super().__init__(vendorId, productId)
+    def __init__(self, vendorId=None, productId=None, path=None, debug=False):
+        if path: path=path.encode('utf-8')
+        super().__init__(vendorId, productId, path=path)
         self.nonblocking = True
         self.__currentState = self.read(64)
-        self.__lastState = [0]*len(self.__currentState)
+        self.__lastState = [0]*len(self.__currentState) # can be 0
         self.__hid_descriptor = HidReportDescriptor(self.get_report_descriptor())
         self.__inputReports = self.__hid_descriptor.inputs()
         self.__usageData = {}
@@ -36,6 +39,7 @@ class HidDevice(hid.Device):
         self.__byteWatch = []
         self.__usageWatch = []
         self.__updateTick = 0
+        self.__readError = False
         self.__debug = debug
         for inputReport in self.__inputReports:
             for usageName in inputReport.usage:
@@ -113,17 +117,27 @@ class HidDevice(hid.Device):
         return c
 
     # TODO: Constant dont need reread
-    def update(self, eventQueue):
+    # Working with HidDevice requires calls to `update`.
+    # The USB input frame is read here.
+    # The goal is to enable consistent status queries,
+    # avoiding multiple calls to `read`.
+    def update(self, eventQueue=None):
         if not self.__inputReports:
             return
-        current = self.read(64)
+        try:
+            current = self.read(64)
+        except:
+            self.__readError = True
+            return
+        self.__readError = False
         if len(current) == 0: return
         # assert(len(current) >= self.__hid_descriptor.inputBitSize)
         self.__updateTick += 1
         self.__lastState = self.__currentState
         self.__currentState = current 
-        if len(self.__lastState) == 0: self.__lastState = current
-        # Always update watching list looking for events
+        if len(self.__lastState) == 0: self.__lastState = current # usually first valid read
+        # Event watching
+        if eventQueue is None: return
         for i in self.__byteWatch: # we dont look for what dont need
             if self.__lastState[i] != self.__currentState[i]:
                 for input in self.__inputReports:
@@ -155,6 +169,74 @@ class HidDevice(hid.Device):
                                     if type(usage) is str and "Button" in usage:
                                         event = "{}{}".format("".join(usage.split()), "Pressed" if c else "Released")
                                         eventQueue.append(event)
+
+
+# a Simple manager for HidDevices
+class HidDeviceManager:
+    def __init__(self, onPlug=None, onUnplug=None):
+        assert(onPlug is None or callable(onPlug))
+        assert(onUnplug is None or callable(onUnplug))
+        self.__actions = {}
+        self.__devices = {}
+        self.__open_devices = {}
+        self.__utils = HidUtils()
+        self.__onPlug = onPlug
+        self.__onUnplug = onUnplug
+
+
+    def open(self, path, debug=False):
+        # we are using path for open devices
+        # opening 2xpaths for same divice...
+        if path in self.__open_devices:
+            return self.__open_devices[path]
+
+        device = None
+        for device in self.__devices:
+            if self.__devices[device]['path'] == path:
+                device = self.__devices[device]
+                break
+
+        if not device: return False
+        self.__open_devices[path] = HidDevice(path=path, debug=debug)
+        return self.__open_devices[path]
+
+    def __look_for_new_devices(self):
+        devices = self.__utils.get_devices()
+        pluged = []
+        unpluged = []
+        for device in devices:
+            if device in self.__devices:
+                # already knows
+                continue
+            else:
+                pluged.append(devices[device])
+        for device in self.__devices:
+            if device in devices:
+                # still there
+                continue
+            else:
+                unpluged.append(self.__devices[device])
+                path = self.__devices[device]['path']
+                if path in self.__open_devices:
+                    del self.__open_devices[path]
+        self.__devices = devices
+        if self.__onPlug:
+            for device in pluged: self.__onPlug(self, device)
+        if self.__onUnplug:
+            for device in unpluged: self.__onUnplug(self, device)
+
+    def setAction(self, event, actionName):
+        self.__actions[event] = actionName
+
+    def update(self):
+        self.__look_for_new_devices()
+        queue = []
+        for path,device in self.__open_devices.items():
+            device.update(queue)
+        for event in queue:
+            # TODO
+            pass
+
 
 # A report for Hid Report Descriptor
 # All data fields defined in a single item share an identical data format
@@ -401,15 +483,15 @@ class HidUtils:
     def get_devices(self):
         devices = {}
         for device in hid.enumerate():
-            id = f"0x{device['vendor_id']:04x}:0x{device['product_id']:04x} {device['product_string']}" 
-            if id in devices:
-                hiddevice = devices[id]
-            else:
-                hiddevice = devices[id] = {'usages': [], 'path': []}
+            usage = HidUtils.get_usage_name(device['usage_page'], device['usage'])
+            resume = f"0x{device['vendor_id']:04x}:0x{device['product_id']:04x};{device['path'].decode('utf-8')} {device['product_string']} [{usage}]"
+            hiddevice = devices[resume] = {}
             for attrib in ['vendor_id', 'product_id', 'product_string', 'serial_number', 'manufacturer_string', 'interface_number', 'bus_type']:
                 hiddevice[attrib] = device[attrib]
-            hiddevice['usages'].append(HidUtils.get_usage_name(device['usage_page'], device['usage']))
-            hiddevice['path'].append(device['path'].decode('utf-8'))
+            hiddevice['usage_page'] = HidUtils.get_page_name(device['usage_page'])
+            hiddevice['usage'] = usage
+            hiddevice['path'] = device['path'].decode('utf-8')
+            # devices.append(hiddevice)
         return devices
 
     @staticmethod

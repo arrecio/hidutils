@@ -1,6 +1,6 @@
 Piece of code for managing HID devices using [hidapi](https://github.com/libusb/hidapi) via [pyhidapi](https://pypi.org/project/hid) (required). Im still working on it.
 
-To use it properly, you'll likely need to include the appropriate calls to `update` in your main loop. The library's logic minimizes the reading of USB input frames by reading only where necessary, ensuring that the overhead is minimal.
+To use it properly, you'll likely need to include the appropriate calls to `update` in your main loop. The library's logic minimizes the reading of USB input frames by reading only where necessary, ensuring that the overhead is minimal. Of course, you can use `read` to read directly from the device in real time, but you'll usually want to use `update` and the provided API, which requires calling `update`.
 
 ## History
 
@@ -105,6 +105,33 @@ while True:
     for event in events:
         print(event)
     events.clear()
+```
+
+### Using HidDeviceManager
+
+A small HID device manager is provided, whose functionality should be sufficient in most cases; however, you will still need to call its `update` method to update the managed devices.  An example that automatically opens all joystick devices and displays the changes using debug mode:
+
+```python
+
+from hidutils import *
+
+def onHidPlug(manager, device):
+    print("Device found:", device['path'], device['product_string'], device['usage'])
+    if device['usage'] == 'Joystick':
+        manager.open(path=device['path'], debug=True)
+    pass
+
+try:
+    os.system("stty -echo")
+    manager = HidDeviceManager(onPlug=onHidPlug, onUnplug=lambda self, device: print("Device unpluged", device['path'], device['product_string'], device['usage']))
+    while True:
+        manager.update()
+except KeyboardInterrupt:
+    print('Interrupted')
+    try:
+        sys.exit(130)
+    except SystemExit:
+        os._exit(130)
 ```
 
 ## More usages
