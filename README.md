@@ -10,6 +10,14 @@ The library will likely encounter errors if you try to use it with devices conta
 
 Write operations are supported through pyhidapi, but my library can’t help you with that—at least for now.
 
+## Install
+
+You can install hidutils using pip, specifying that it should be installed directly from this repository.
+
+```
+pip install git+https://github.com/arrecio/hidutils.git
+```
+
 ## Usage
 
 Look for available devices:
