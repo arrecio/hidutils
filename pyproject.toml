@@ -1,0 +1,19 @@
+[project]
+name = "pyhidutils"
+version = "0.0.1"
+authors = [
+  { name="Víctor Arnelas", email="arrecio@gmail.com" },
+]
+description = "Another python hid device manager."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+[project.urls]
+Homepage = "https://github.com/arrecio/hidutils/"
+Issues = "https://github.com/arrecio/hidutils/issues"
+
