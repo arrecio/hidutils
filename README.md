@@ -33,13 +33,13 @@ for device in devices:
     print("  Usages:", devices[device]['usages'])
 ```
 
-“Usage” is the term used in HID (Human Interface Device) documentation to refer to device capabilities. These are names from a list and should be used as references. Once the device has been identified, the VendorID and ProductID must be used to instantiate a HidDevice. For example, look in the list above for a device designated as a mouse and grab vendor and product id and use it for initialice a HidDevice:
+“Usage” is the term used in HID (Human Interface Device) documentation to refer to device capabilities. These are names from a list and should be used as references. Once the device has been identified, the VendorID and ProductID cant be used to instantiate a HidDevice. If a single physical device offers different features, you'll probably prefer to use the `path` instead. Using the VendorId and ProductId pair will select the first device in the list that matches those criteria. For example, look in the list above for a device designated as a mouse and grab vendor and product id and use it for initialice a HidDevice:
 
 ```python
 import hidutils
 
 hidutils = hidutils.HidUtils()
-hiddevice = hidutils.HidDevice(0x0123, 0xABCD)
+hiddevice = hidutils.HidDevice(0x0123, 0xABCD) # these are random values
 # if no valid vendor/product HIDException is raised
 hiddevice.dump_hid_descriptor() # shows the Hid Descriptor of the device
 ```
@@ -96,6 +96,7 @@ Calling `device.dump_hid_descriptor` with `debug=True` will list the device’s 
 
 ```python
 import hidutils
+import time
 
 hidutils = hidutils.HidUtils()
 hiddevice = hidutils.HidDevice(0x0123, 0xABCD)
@@ -111,8 +112,10 @@ while True:
         print("X:", axis)
         last = axis
     for event in events:
-        print(event)
+        print(event) # event is a tuple with (hiddevice, usage, newVal, oldVal)
     events.clear()
+    time.sleep(0.16)
+
 ```
 
 ### Using HidDeviceManager
@@ -122,6 +125,7 @@ A small HID device manager is provided, whose functionality should be sufficient
 ```python
 
 from hidutils import *
+import time
 
 def onHidPlug(manager, device):
     print("Device found:", device['path'], device['product_string'], device['usage'])
@@ -134,6 +138,7 @@ try:
     manager = HidDeviceManager(onPlug=onHidPlug, onUnplug=lambda self, device: print("Device unpluged", device['path'], device['product_string'], device['usage']))
     while True:
         manager.update()
+        time.sleep(0.16)
 except KeyboardInterrupt:
     print('Interrupted')
     try:

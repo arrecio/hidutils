@@ -9,7 +9,7 @@ __all__ = ["HidDevice", "HidDeviceManager", "HidUtils"]
 
 
 # HidDevice class
-# encapsulates a hid.Device class.
+# encapsulates a hid.Device class (wich uses hidapi to access the hardware).
 #
 # see:
 # https://www.usb.org/sites/default/files/hid1_11.pdf
@@ -26,6 +26,9 @@ __all__ = ["HidDevice", "HidDeviceManager", "HidUtils"]
 # is the specification to translate usagePage/usage pair to human readable form.
 # The control usage is orientative, is the one assigned by vendor. Joystick axes are usually assigned
 # to X, Y, Z, Rx, Ry, Rz or Slider usages.
+# H is for Human. A person uses the device for a specific purpose, usually to interact with the equipment
+# by (mostly) pressing buttons or keys or by operating levers (axes) so buttons, keys and axes must be
+# treated specially.
 #
 class HidDevice(hid.Device):
     def __init__(self, vendorId=None, productId=None, path=None, debug=False):
@@ -44,9 +47,21 @@ class HidDevice(hid.Device):
         self.__updateTick = 0
         self.__readError = False
         self.__debug = debug
+        self.__usageButtons = []
+        self.__usageAxes = []
+        # self.__numKeys = 0
+        self.dump_hid_descriptor()
         for inputReport in self.__inputReports:
             for usageName in inputReport.usage:
                 self.__inputUsage.append(usageName)
+                if inputReport.flags & 0x02 == 0x02: # Variables
+                    if inputReport.usagePage == 0x09: # Buttons
+                        self.__usageButtons.append(usageName)
+                    if inputReport.usagePage == 0x01 and usageName in ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz', 'Slider']: # Buttons
+                        self.__usageAxes.append(usageName)
+            # if inputReport.flags & 0x02 == 0 and inputReport.usageMinimun is not None: # Array
+            #     if inputReport.usagePage == 0x07: # Keyboard
+            #         self.__numKeys += (inputReport.usageMaximun - inputReport.usageMinimun)
             for b, uds in inputReport.byteMap.items():
                 for ud in uds:
                     self.__usageData[ud[0]] = [0, inputReport, ud, 0]
@@ -57,6 +72,14 @@ class HidDevice(hid.Device):
     # TODO split-join first?
     # def __getattr__(self, name: str):
     #     return self.__state[name]
+
+    @property
+    def numButtons(self):
+        return len(self.__usageButtons)
+
+    @property
+    def numAxes(self):
+        return len(self.__usageAxes)
 
     def inputUsages(self):
         return self.__inputUsage.copy()
@@ -194,9 +217,10 @@ class HidDevice(hid.Device):
                                         m, s = 2**input.reportSize - 1, 2 ** (
                                             input.reportSize - 1
                                         )  # to byteMap?
-                                        l = ((l & m) ^ s) - s
+                                        # l = ((l & m) ^ s) - s
                                         c = ((c & m) ^ s) - s
                                     c = input.compute(c)
+                                    l = self.__usageData[usage][0] # read computed last from register
                                     self.__usageData[usage][0] = c
                                     self.__usageData[usage][3] = self.__updateTick
                                     if self.__debug:
@@ -204,13 +228,12 @@ class HidDevice(hid.Device):
                                             "New value: ", usage, c
                                         )  # change to logging.debug?
                                     # events
-                                    if input.usagePage == 0x09:  # Buttons
-                                        if type(usage) is str and "Button" in usage:
-                                            event = "{}{}".format(
-                                                "".join(usage.split()),
-                                                "Pressed" if c else "Released",
-                                            )
-                                            eventQueue.append(event)
+                                    if input.usagePage in [0x07, 0x09]:  # Buttons and Keys
+                                    #     event = "{}{}".format(
+                                    #         "".join(usage.split()),
+                                    #         "Pressed" if c else "Released",
+                                    #     )
+                                        eventQueue.append((self, usage, c, l))
 
 
 # a Simple manager for HidDevices
@@ -303,7 +326,8 @@ class HidDeviceManager:
             device.update(queue)
             for event in queue:
                 if callable(onEvent):
-                    onEvent(device, self.__aliases[path][0]+event)
+                    onEvent(self.__aliases[path][0], event[1], event[2], event[3])
+                    # onEvent(device, self.__aliases[path][0], event[1], event[2], event[3])
             queue.clear()
         # print(time.time()-t)
 
