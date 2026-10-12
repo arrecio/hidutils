@@ -187,7 +187,7 @@ class HidDevice(hid.Device):
             self.__currentState = current
             if len(self.__lastState) == 0: continue # first reading
             # Event watching
-            if eventQueue is None:
+            if eventQueue is None and not self.__debug:
                 return
             for i in self.__byteWatch:  # we dont look for what dont need
                 if self.__lastState[i] != self.__currentState[i]:
@@ -213,27 +213,15 @@ class HidDevice(hid.Device):
                                     l = l >> shift
                                     c = c >> shift
                                 if l != c:
-                                    if input.readSigned:
-                                        m, s = 2**input.reportSize - 1, 2 ** (
-                                            input.reportSize - 1
-                                        )  # to byteMap?
-                                        # l = ((l & m) ^ s) - s
-                                        c = ((c & m) ^ s) - s
                                     c = input.compute(c)
                                     l = self.__usageData[usage][0] # read computed last from register
                                     self.__usageData[usage][0] = c
                                     self.__usageData[usage][3] = self.__updateTick
+                                    if eventQueue is not None: eventQueue.append((self, usage, c, l))
                                     if self.__debug:
                                         print(
                                             "New value: ", usage, c
                                         )  # change to logging.debug?
-                                    # events
-                                    if input.usagePage in [0x07, 0x09]:  # Buttons and Keys
-                                    #     event = "{}{}".format(
-                                    #         "".join(usage.split()),
-                                    #         "Pressed" if c else "Released",
-                                    #     )
-                                        eventQueue.append((self, usage, c, l))
 
 
 # a Simple manager for HidDevices
@@ -348,23 +336,24 @@ class Report:
         self.unitExponent = 0
         self.designatorIndex = self.designatorMaximun = self.designatorMinimun = None
         self.stringIndex = self.stringMaximun = self.stringMinimun = None
-        self.resolution = 1
-        self.readSigned = True
+        self.signed = True
+        self.__resolution = 1
+        self.__m = self.__s = 0
         self.flags = 0
         self.done = False
         self.usage = []
         self.type = type
 
     def compute(self, rawVal):
+        if self.signed: rawVal = ((rawVal & self.__m) ^ self.__s) - self.__s
         if self.flags & 0x02 == 0:  # Array? so we report value readed
             val = HidUtils.get_usage_name(self.usagePage, self.logicalMinimun + rawVal)
         else:  # Variable?
-            val = rawVal * self.resolution
+            val = rawVal * self.__resolution
         return val
 
     def build(self, arrayCount):
         isArray = self.flags & 0x02 == 0
-        self.signedData = self.logicalMinimun is None or self.logicalMinimun < 0
         # adds usage minimun -> maximun if available
         if not self.usageMinimun is None and not self.usageMaximun is None:
             if isArray:
@@ -373,13 +362,16 @@ class Report:
             else:
                 for i in range(self.usageMinimun, self.usageMaximun + 1):
                     self.usage.append(HidUtils.get_usage_name(self.usagePage, i))
-        self.readSigned = self.logicalMinimun < 0
+        self.signed = self.logicalMinimun < 0
+        if self.signed:
+            self.__m = 2**self.reportSize - 1
+            self.__s = 2 ** (self.reportSize - 1)
         if not (
             self.physicalMaximun is None
             or self.physicalMinimun is None
             or (self.physicalMinimun == self.physicalMinimun == 0)
         ):
-            self.resolution = (self.logicalMaximun - self.logicalMinimun) / (
+            self.__resolution = (self.logicalMaximun - self.logicalMinimun) / (
                 (self.physicalMaximun - self.physicalMinimun) * 10**self.unitExponent
             )
         self.byteMap = self.__get_field_map()
