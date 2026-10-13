@@ -40,9 +40,9 @@ class HidDevice(hid.Device):
         self.__lastState = [0] * len(self.__currentState)  # can be 0
         self.__hid_descriptor = HidReportDescriptor(self.get_report_descriptor())
         self.__inputReports = self.__hid_descriptor.inputs()
-        self.__usageData = {}
+        self.__stored = {}
         self.__inputUsage = []
-        self.__byteWatch = []
+        self.__byteWatch = {}
         self.__usageWatch = []
         self.__updateTick = 0
         self.__readError = False
@@ -64,7 +64,8 @@ class HidDevice(hid.Device):
             #         self.__numKeys += (inputReport.usageMaximun - inputReport.usageMinimun)
             for b, uds in inputReport.byteMap.items():
                 for ud in uds:
-                    self.__usageData[ud[0]] = [0, inputReport, ud, 0]
+                    # value, inputReport, ud, tick, dataRaw 
+                    self.__stored[ud[0]] = [0, inputReport, ud, 0, 0]
         if debug:
             for i in self.__inputUsage:
                 self.watch(i)
@@ -85,7 +86,7 @@ class HidDevice(hid.Device):
         return self.__inputUsage.copy()
 
     def watch(self, usage):
-        if not usage in self.__usageData:
+        if not usage in self.__stored:
             return False
         if usage in self.__usageWatch:
             return True
@@ -94,7 +95,7 @@ class HidDevice(hid.Device):
         return True
 
     def unwatch(self, usage):
-        if not usage in self.__usageData:
+        if not usage in self.__stored:
             return
         if not usage in self.__usageWatch:
             return
@@ -110,14 +111,15 @@ class HidDevice(hid.Device):
     # this method marks for watch only the bytes where are allocated the data
     # or part of the data in the watching list
     def __rebuild_byte_watch(self):
-        self.__byteWatch = []
+        self.__byteWatch = {}
         for inputReport in self.__inputReports:
             for b, uds in inputReport.byteMap.items():
                 for ud in uds:
-                    if ud[0] in self.__usageWatch:
-                        for i in range(ud[1], ud[1] + ud[2]):
-                            if not i in self.__byteWatch:
-                                self.__byteWatch.append(i)
+                    usage, index, size, mask, shift = ud
+                    if usage in self.__usageWatch:
+                        if not index in self.__byteWatch: self.__byteWatch[index] = {}
+                        if not size in self.__byteWatch[index]: self.__byteWatch[index][size] = []
+                        self.__byteWatch[index][size].append((inputReport, usage, mask, shift))
 
     # dups descriptor in a readable form
     def dump_hid_descriptor(self, raw=False, writer=sys.stdout.write):
@@ -132,14 +134,14 @@ class HidDevice(hid.Device):
                         usage, index, size, mask, shift = ud
                         writer(
                             "  Usage: {}, Index: {}, Size: {}, Mask: {}, Shift: {}, Signed: {}\n".format(
-                                usage, index, size, mask, shift, input.readSigned
+                                usage, index, size, mask, shift, input.signed
                             )
                         )
 
     def get_state(self, usage):
         # if isConstant and _udateTick > 0: no leer
-        if usage in self.__usageData:
-            s = self.__usageData[usage]
+        if usage in self.__stored:
+            s = self.__stored[usage]
             if self.__updateTick > s[3]:
                 s[0] = self.__read_usage(s[1], s[2])
                 s[3] = self.__updateTick
@@ -164,13 +166,15 @@ class HidDevice(hid.Device):
     # The USB input frame is read here.
     # The goal is to enable consistent status queries,
     # avoiding multiple calls to `read`.
+    # NOTE You need to wait at least 1ms between updates while nonblocking
     def update(self, eventQueue=None):
         if not self.__inputReports:
             return
         reads = []
         try:
             # consume the input buffer every update
-            read = self.read(64)
+            # we w8 at least 1ms for no sleep loop
+            read = self.read(64, 1)
             while len(read) != 0:
                 reads.append(read)
                 read = self.read(64)
@@ -189,41 +193,34 @@ class HidDevice(hid.Device):
             # Event watching
             if eventQueue is None and not self.__debug:
                 return
-            for i in self.__byteWatch:  # we dont look for what dont need
+            for i in self.__byteWatch.keys():  # we dont look for what dont need
                 if self.__lastState[i] != self.__currentState[i]:
-                    for input in self.__inputReports:
-                        if i in input.byteMap:
-                            uds = input.byteMap[i]
-                            for ud in uds:
-                                usage, start, size, mask, shift = ud
-                                if not usage in self.__usageWatch:
-                                    continue
-                                l = int.from_bytes(
-                                    self.__lastState[start : start + size],
-                                    byteorder="little",
-                                )
-                                c = int.from_bytes(
-                                    self.__currentState[start : start + size],
-                                    byteorder="little",
-                                )
-                                if mask:
-                                    l = l & mask
-                                    c = c & mask
-                                if shift:
-                                    l = l >> shift
-                                    c = c >> shift
-                                if l != c:
-                                    c = input.compute(c)
-                                    l = self.__usageData[usage][0] # read computed last from register
-                                    self.__usageData[usage][0] = c
-                                    self.__usageData[usage][3] = self.__updateTick
-                                    if eventQueue is not None: eventQueue.append((self, usage, c, l))
-                                    if self.__debug:
-                                        print(
-                                            "New value: ", usage, c
-                                        )  # change to logging.debug?
+                    for size in self.__byteWatch[i]:
+                        cached = int.from_bytes(
+                            self.__currentState[i : i + size],
+                            byteorder="little",
+                        )
+                        for watch in self.__byteWatch[i][size]:
+                            c = cached
+                            input, usage, mask, shift = watch
+                            stored = self.__stored[usage]
+                            if stored[3] == self.__updateTick: continue # already read
+                            l = stored[4]  # stored rawValue for check new values
+                            if mask:  c = c &  mask
+                            if shift: c = c >> shift
+                            if l != c:
+                                stored[4] = c # we store new raw data
+                                c = input.compute(c) # turn to computed
+                                l = stored[0] # loads old computed
+                                stored[0] = c
+                                stored[3] = self.__updateTick
+                                if eventQueue is not None: eventQueue.append((self, usage, c, l))
+                                if self.__debug:
+                                    print(
+                                        "New value: ", usage, c
+                                    )  # change to logging.debug?
 
-
+ 
 # a Simple manager for HidDevices
 class HidDeviceManager:
     def __init__(self, onPlug=None, onUnplug=None):
@@ -375,12 +372,35 @@ class Report:
                 (self.physicalMaximun - self.physicalMinimun) * 10**self.unitExponent
             )
         self.byteMap = self.__get_field_map()
+        self.byteMap = self.__get_field_map2()
 
     @property
     def bitSize(self):
         return self.reportSize * self.reportCount
 
     def __get_field_map(self):
+        hstart = self.dataIndex
+        map = {}
+        size = self.reportSize
+        assert size > 0
+        mask = 2**size - 1
+        # Only maps valid usages, anonymous are discarded
+        for i in range(len(self.usage)):
+            usage = self.usage[i]
+            start = hstart + i * size  # bit start in the bit field
+            end = start + size - 1  # bit end in the bit field
+            bstart = int(start / 8)
+            bend = int(end / 8)
+            shift = start % 8
+            #       usage   index     size           mask            shift
+            field = (usage, bstart, bend - bstart + 1, mask << shift, shift)
+            for byte in range(field[1], field[1] + field[2]):
+                if not byte in map:
+                    map[byte] = []
+                map[byte].append(field)
+        return map
+
+    def __get_field_map2(self):
         hstart = self.dataIndex
         map = {}
         size = self.reportSize
@@ -477,6 +497,7 @@ class HidReportDescriptor:
                         report.__setattr__(l, L[l])
                     if not report.reportId is None and dataIndex == 0:
                         # TODO need better solution if reportId is after first report, possible?
+                        # see https://hidapi-d.dpldocs.info/hidapi.bindings.hid_read.html
                         dataIndex = 8
                     report.dataIndex = dataIndex
                     report.build(arrayCount)
