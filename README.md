@@ -119,24 +119,27 @@ while True:
 A small HID device manager is provided, whose functionality should be sufficient in most cases; however, you will still need to call its `update` method to update the managed devices.  An example that automatically opens all joystick devices and displays the changes using debug mode:
 
 ```python
-
+import os
 from hidutils import *
 import time
-
 def onHidPlug(manager, device):
-    print("Device found:", device['path'], device['product_string'], device['usage'])
-    if device['usage'] == 'Joystick':
-        manager.open(path=device['path'], debug=True)
+    print("Device found:", device["path"], device["product_string"], device["usage"])
+    if device["usage"] == "Joystick":
+        manager.open(path=device["path"], debug=True)
     pass
-
 try:
     os.system("stty -echo")
-    manager = HidDeviceManager(onPlug=onHidPlug, onUnplug=lambda self, device: print("Device unpluged", device['path'], device['product_string'], device['usage']))
+    manager = HidDeviceManager(
+        onPlug=onHidPlug,
+        onUnplug=lambda self, device: print(
+            "Device unpluged", device["path"], device["product_string"], device["usage"]
+        ),
+    )
     while True:
         manager.update()
         time.sleep(0.16)
 except KeyboardInterrupt:
-    print('Interrupted')
+    print("Interrupted")
     try:
         sys.exit(130)
     except SystemExit:
