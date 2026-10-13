@@ -1,4 +1,5 @@
 # Proving access to game controls (and any other) throgh HID (Human Interface Device)
+# Main TODO: Write operations
 
 import sys
 import hid
@@ -37,8 +38,8 @@ class HidDevice(hid.Device):
         super().__init__(vendorId, productId, path=path)
         self.nonblocking = True
         self.__path = path
-        self.__vendorId = vendorId
-        self.__productId = productId
+        self.__vendorId = vendorId or 0
+        self.__productId = productId or 0
         self.__currentState = self.read(64)
         self.__lastState = [0] * len(self.__currentState)  # can be 0
         self.__hid_descriptor = HidReportDescriptor(self.get_report_descriptor())
@@ -52,8 +53,6 @@ class HidDevice(hid.Device):
         self.__debug = debug
         self.__usageButtons = []
         self.__usageAxes = []
-        # self.__numKeys = 0
-        # self.dump_hid_descriptor()
         for inputReport in self.__inputReports:
             for usageName in inputReport.usage:
                 self.__inputUsage.append(usageName)
@@ -62,9 +61,6 @@ class HidDevice(hid.Device):
                         self.__usageButtons.append(usageName)
                     if inputReport.usagePage == 0x01 and usageName in ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz', 'Slider']: # Buttons
                         self.__usageAxes.append(usageName)
-            # if inputReport.flags & 0x02 == 0 and inputReport.usageMinimun is not None: # Array
-            #     if inputReport.usagePage == 0x07: # Keyboard
-            #         self.__numKeys += (inputReport.usageMaximun - inputReport.usageMinimun)
             for b, uds in inputReport.byteMap.items():
                 for ud in uds:
                     # value, inputReport, ud, tick, dataRaw 
@@ -79,11 +75,6 @@ class HidDevice(hid.Device):
         else:
             return "{}:{};{}".format(hex(self.__vendorId), hex(self.__productId), self.product)
     __repr__ = __str__
-
-
-    # TODO split-join first?
-    # def __getattr__(self, name: str):
-    #     return self.__state[name]
 
     @property
     def numButtons(self):
@@ -225,6 +216,11 @@ class HidDevice(hid.Device):
                                 l = stored[0] # loads old computed
                                 stored[0] = c
                                 stored[3] = self.__updateTick
+                                if input.flags & 0x02 == 0: # array
+                                    usage = HidUtils.get_usage_name(input.usagePage, c if c else l)
+                                    c = 1 if c else 0
+                                    l = 0 if c else 1
+                                    # TODO virtual key codes for keyboard?
                                 if eventQueue is not None: eventQueue.append((self, usage, c, l))
                                 if self.__debug:
                                     print(
@@ -356,7 +352,7 @@ class Report:
     def compute(self, rawVal):
         if self.signed: rawVal = ((rawVal & self.__m) ^ self.__s) - self.__s
         if self.flags & 0x02 == 0:  # Array? so we report value readed
-            val = HidUtils.get_usage_name(self.usagePage, self.logicalMinimun + rawVal)
+            val = self.logicalMinimun + rawVal
         else:  # Variable?
             val = rawVal * self.__resolution
         return val
@@ -366,7 +362,7 @@ class Report:
         # adds usage minimun -> maximun if available
         if not self.usageMinimun is None and not self.usageMaximun is None:
             if isArray:
-                for i in range(self.reportCount):
+                for i in range(self.reportCount): # TODO think on another names
                     self.usage.append("Arr{}Val{}".format(arrayCount, i))
             else:
                 for i in range(self.usageMinimun, self.usageMaximun + 1):
@@ -434,14 +430,7 @@ class Report:
                 map[byte].append(field)
         return map
 
-    def __checks(self):
-        pass
-        # if usageMinimun not None then usageMaximun not None and viceverse
-        # if explicitUsage is set then no usageMinimun or Maximum must be set
-        # delimiter must be 0 or 1
-        # reportCount >= num of usages, if
-
-
+# stupid auxilary class, keep for clartity
 class Item:
     TYPE_MAIN = 0x00
     TYPE_GLOBAL = 0x04
@@ -3642,14 +3631,15 @@ class HidUtils:
         0x1d, 0x2a, 0x38, 0xdb, 0x9d, 0x36, 0xb8, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     ]
-    __UT_DATA_Sel = 1, "Selector", [(0x02, 0)]
-    __UT_DATA_SV = 2, "Static Value", [(0x01, 1), (0x02, 1), (0x03, 0)]
-    __UT_DATA_SF = 3, "Static Flag", [(0x01, 1), (0x02, 1), (0x03, 0)]
-    __UT_DATA_DV = 4, "Dynamic Value", [(0x01, 0), (0x02, 1), (0x03, 0)]
-    __UT_DATA_DF = 5, "Dynamic Flag", [(0x01, 0), (0x02, 1), (0x03, 0)]
-    __UT_NAry = 1, "Named Array", "Logical"
-    __UT_CA = 2, "Application Collection", "Application"
-    __UT_CL = 3, "Logical Collection", "Logical"
-    __UT_CP = 4, "Physical Collection", "Physical"
-    __UT_US = 5, "Usage Switch", "Logical"
-    __UT_UM = 6, "Usage Modifier", "Logical"
+    # Nothing relevant imho
+    # __UT_DATA_Sel = 1, "Selector", [(0x02, 0)]
+    # __UT_DATA_SV = 2, "Static Value", [(0x01, 1), (0x02, 1), (0x03, 0)]
+    # __UT_DATA_SF = 3, "Static Flag", [(0x01, 1), (0x02, 1), (0x03, 0)]
+    # __UT_DATA_DV = 4, "Dynamic Value", [(0x01, 0), (0x02, 1), (0x03, 0)]
+    # __UT_DATA_DF = 5, "Dynamic Flag", [(0x01, 0), (0x02, 1), (0x03, 0)]
+    # __UT_NAry = 1, "Named Array", "Logical"
+    # __UT_CA = 2, "Application Collection", "Application"
+    # __UT_CL = 3, "Logical Collection", "Logical"
+    # __UT_CP = 4, "Physical Collection", "Physical"
+    # __UT_US = 5, "Usage Switch", "Logical"
+    # __UT_UM = 6, "Usage Modifier", "Logical"
