@@ -36,6 +36,9 @@ class HidDevice(hid.Device):
             path = path.encode("utf-8")
         super().__init__(vendorId, productId, path=path)
         self.nonblocking = True
+        self.__path = path
+        self.__vendorId = vendorId
+        self.__productId = productId
         self.__currentState = self.read(64)
         self.__lastState = [0] * len(self.__currentState)  # can be 0
         self.__hid_descriptor = HidReportDescriptor(self.get_report_descriptor())
@@ -50,7 +53,7 @@ class HidDevice(hid.Device):
         self.__usageButtons = []
         self.__usageAxes = []
         # self.__numKeys = 0
-        self.dump_hid_descriptor()
+        # self.dump_hid_descriptor()
         for inputReport in self.__inputReports:
             for usageName in inputReport.usage:
                 self.__inputUsage.append(usageName)
@@ -69,6 +72,14 @@ class HidDevice(hid.Device):
         if debug:
             for i in self.__inputUsage:
                 self.watch(i)
+
+    def __str__(self):
+        if self.__path:
+            return "{};{}".format(self.__path, self.product)
+        else:
+            return "{}:{};{}".format(hex(self.__vendorId), hex(self.__productId), self.product)
+    __repr__ = __str__
+
 
     # TODO split-join first?
     # def __getattr__(self, name: str):
@@ -156,7 +167,7 @@ class HidDevice(hid.Device):
             c = c & mask
         if shift:
             c = c >> shift
-        if input.readSigned:
+        if input.signed:
             m, s = 2**input.reportSize - 1, 2 ** (input.reportSize - 1)  # to byteMap?
             c = ((c & m) ^ s) - s
         return input.compute(c)
@@ -237,6 +248,7 @@ class HidDeviceManager:
         self.__availableIndices = {}
         self.__aliases = {}
 
+    # for safety only path is allowed using the manager
     def open(self, path, debug=False):
         if path in self.__open_devices:
             return self.__open_devices[path]

@@ -23,11 +23,10 @@ pip install git+https://github.com/arrecio/hidutils.git
 Look for available devices:
 
 ```python
-
 import hidutils
 
-hidutils = hidutils.HidUtils()
-devices = hidutils.get_devices()
+utils = hidutils.HidUtils()
+devices = utils.get_devices()
 for device in devices:
     print("Device found:", device)
     print("  Usages:", devices[device]['usages'])
@@ -38,8 +37,7 @@ for device in devices:
 ```python
 import hidutils
 
-hidutils = hidutils.HidUtils()
-hiddevice = hidutils.HidDevice(0x0123, 0xABCD) # these are random values
+hiddevice = hidutils.HidDevice(0x0123, 0xABCD)
 # if no valid vendor/product HIDException is raised
 hiddevice.dump_hid_descriptor() # shows the Hid Descriptor of the device
 ```
@@ -98,8 +96,7 @@ Calling `device.dump_hid_descriptor` with `debug=True` will list the device’s 
 import hidutils
 import time
 
-hidutils = hidutils.HidUtils()
-hiddevice = hidutils.HidDevice(0x0123, 0xABCD)
+hiddevice = hidutils.HidDevice(0x0738, 0x1718) # my mouse
 hiddevice.watch('Button 1')
 hiddevice.watch('Button 2')
 
@@ -114,8 +111,7 @@ while True:
     for event in events:
         print(event) # event is a tuple with (hiddevice, usage, newVal, oldVal)
     events.clear()
-    time.sleep(0.16)
-
+    time.sleep(0.016)
 ```
 
 ### Using HidDeviceManager
