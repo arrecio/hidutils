@@ -86,19 +86,21 @@ At first, this information might seem overwhelming, but the documentation is qui
 
 ### Watching events and look for data
 
-> [!WARNING]
-> Only button events are allowed at this moment.
-
 I created this library so I wouldn't have to rely on Xinput or similar libraries when detecting button presses on my game controller or checking the status of the joysticks. I'm not very interested in other HID features, but I haven't ruled out expanding its functionality. To detect events, you must first listen for them. You can also read the status directly.
 Calling `device.dump_hid_descriptor` with `debug=True` will list the device’s data sources (Usages). The name is the first piece of information displayed; the rest is information used internally to read the data within the USB input frame.
+
+> [!NOTE]
+> An event occurs when a monitored value changes from its previous state. Keep in mind that, in the case of axes, countless events may be triggered and need to be processed every second (or even in every update call), so you will most likely prefer to check the value directly when you need to.
 
 ```python
 import hidutils
 import time
 
 hiddevice = hidutils.HidDevice(0x0738, 0x1718) # my mouse
-hiddevice.watch('Button 1')
-hiddevice.watch('Button 2')
+print("Buttons available: ", hiddevice.usageButtons)
+# to watch events: device.watch(usage1, usage2, ...)
+# we watch all available buttons here
+hiddevice.watch(*hiddevice.usageButtons)
 
 events = []
 last = 0

@@ -77,31 +77,32 @@ class HidDevice(hid.Device):
     __repr__ = __str__
 
     @property
-    def numButtons(self):
-        return len(self.__usageButtons)
+    def usageButtons(self):
+        return self.__usageButtons.copy()
 
     @property
-    def numAxes(self):
-        return len(self.__usageAxes)
+    def usageAxes(self):
+        return self.__usageAxes.copy()
 
     def inputUsages(self):
         return self.__inputUsage.copy()
 
-    def watch(self, usage):
-        if not usage in self.__stored:
-            return False
-        if usage in self.__usageWatch:
-            return True
-        self.__usageWatch.append(usage)
+    def watch(self, *usages):
+        for usage in usages:
+            if not usage in self.__stored:
+                continue
+            if usage in self.__usageWatch:
+                continue
+            self.__usageWatch.append(usage)
         self.__rebuild_byte_watch()
-        return True
 
-    def unwatch(self, usage):
-        if not usage in self.__stored:
-            return
-        if not usage in self.__usageWatch:
-            return
-        self.__usageWatch.remove(usage)
+    def unwatch(self, *usages):
+        for usage in usages:
+            if not usage in self.__stored:
+                continue
+            if not usage in self.__usageWatch:
+                continue
+            self.__usageWatch.remove(usage)
         self.__rebuild_byte_watch()
 
     def watchAll(self):
@@ -191,7 +192,7 @@ class HidDevice(hid.Device):
             self.__updateTick += 1
             self.__lastState = self.__currentState
             self.__currentState = current
-            if len(self.__lastState) == 0: continue # first reading
+            if len(self.__lastState) == 0: self.__lastState = [0] * len(self.__currentState) # first reading we asume is 0 filled
             # Event watching
             if eventQueue is None and not self.__debug:
                 return
@@ -327,7 +328,7 @@ class HidDeviceManager:
 # A report for Hid Report Descriptor
 # All data fields defined in a single item share an identical data format
 class Report:
-    def __init__(self, type):
+    def __init__(self, reportType):
         self.dataIndex = 0
         self.usagePage = 0
         self.reportId = None
@@ -345,9 +346,8 @@ class Report:
         self.__resolution = 1
         self.__m = self.__s = 0
         self.flags = 0
-        self.done = False
         self.usage = []
-        self.type = type
+        self.type = reportType
 
     def compute(self, rawVal):
         if self.signed: rawVal = ((rawVal & self.__m) ^ self.__s) - self.__s
@@ -380,35 +380,12 @@ class Report:
                 (self.physicalMaximun - self.physicalMinimun) * 10**self.unitExponent
             )
         self.byteMap = self.__get_field_map()
-        self.byteMap = self.__get_field_map2()
 
     @property
     def bitSize(self):
         return self.reportSize * self.reportCount
 
     def __get_field_map(self):
-        hstart = self.dataIndex
-        map = {}
-        size = self.reportSize
-        assert size > 0
-        mask = 2**size - 1
-        # Only maps valid usages, anonymous are discarded
-        for i in range(len(self.usage)):
-            usage = self.usage[i]
-            start = hstart + i * size  # bit start in the bit field
-            end = start + size - 1  # bit end in the bit field
-            bstart = int(start / 8)
-            bend = int(end / 8)
-            shift = start % 8
-            #       usage   index     size           mask            shift
-            field = (usage, bstart, bend - bstart + 1, mask << shift, shift)
-            for byte in range(field[1], field[1] + field[2]):
-                if not byte in map:
-                    map[byte] = []
-                map[byte].append(field)
-        return map
-
-    def __get_field_map2(self):
         hstart = self.dataIndex
         map = {}
         size = self.reportSize
