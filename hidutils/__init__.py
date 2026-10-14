@@ -49,7 +49,7 @@ class HidDevice(hid.Device):
         self.__byteWatch = {}
         self.__usageWatch = []
         self.__updateTick = 0
-        self.__readError = False
+        self.__readError = False # im not using this
         self.__debug = debug
         self.__usageButtons = []
         self.__usageAxes = []
@@ -142,27 +142,26 @@ class HidDevice(hid.Device):
                         )
 
     def get_state(self, usage):
-        # if isConstant and _udateTick > 0: no leer
+        # TODO if isConstant and _udateTick > 0: no leer
         if usage in self.__stored:
             s = self.__stored[usage]
-            if self.__updateTick > s[3]:
-                s[0] = self.__read_usage(s[1], s[2])
+            val, input, ud, tick, rawVal = s
+            if self.__updateTick > tick:
+                s[4] = self.__read_usage(ud)
+                s[0] = input.compute(s[4])
                 s[3] = self.__updateTick
             return s[0]
 
-    def __read_usage(self, input, usageDescriptor):
+    def __read_usage(self,usageDescriptor):
         usage, start, size, mask, shift = usageDescriptor
         c = int.from_bytes(
-            self.__currentState[start : start + size], byteorder="little", signed=True
-        )
+            self.__currentState[start : start + size], byteorder="little"
+            )
         if mask:
             c = c & mask
         if shift:
             c = c >> shift
-        if input.signed:
-            m, s = 2**input.reportSize - 1, 2 ** (input.reportSize - 1)  # to byteMap?
-            c = ((c & m) ^ s) - s
-        return input.compute(c)
+        return c
 
     # TODO: Constant dont need reread
     # Working with HidDevice requires calls to `update`.
@@ -177,6 +176,7 @@ class HidDevice(hid.Device):
         try:
             # consume the input buffer every update
             # we w8 at least 1ms for no sleep loop
+            # NOTE it ignores set blocking? see: https://github.com/libusb/hidapi/blob/852cc68b8e0e4c7eba0815ef992951cd8b75c55b/linux/hid.c#L1194
             read = self.read(64, 1)
             while len(read) != 0:
                 reads.append(read)
@@ -407,7 +407,7 @@ class Report:
                 map[byte].append(field)
         return map
 
-# stupid auxilary class, keep for clartity
+# stupid auxilary class, keep for clarity
 class Item:
     TYPE_MAIN = 0x00
     TYPE_GLOBAL = 0x04

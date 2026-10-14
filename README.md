@@ -1,6 +1,6 @@
 Piece of code for managing HID devices using [hidapi](https://github.com/libusb/hidapi) via [pyhidapi](https://pypi.org/project/hid) (required). Im still working on it.
 
-To use it properly, you'll likely need to include the appropriate calls to `update` in your main loop. The library's logic minimizes the reading of USB input frames by reading only where necessary, ensuring that the overhead is minimal. Of course, you can use `read` to read directly from the device in real time, but you'll usually want to use `update` and the provided API, which requires calling `update`.
+To use it properly, you'll likely need to include the appropriate calls to `update` in your main loop. The library's logic minimizes the reading of USB input frames by reading only where necessary, ensuring that the overhead is minimal. Of course, you can use `read` to read directly from the device in real time, but you'll usually want to use the provided API, which requires calling `update`.
 
 ## History
 
@@ -15,8 +15,12 @@ Write operations are supported through pyhidapi, but my library can’t help you
 You can install hidutils using pip, specifying that it should be installed directly from this repository.
 
 ```
-pip install git+https://github.com/arrecio/hidutils.git
+pip install git+https://github.com/arrecio/pyhidutils.git
 ```
+
+For hidapi, I can mention Arch Linux, where you need to run `pacman -S install hidapi`. On Windows, you can download the binaries (hidapi.dll) from its GitHub repository [here](https://github.com/libusb/hidapi/releases/tag/hidapi-0.15.0) and place them in the Windows directory or the directory where the Python executable is located.
+
+For pyhidapi just `pip install hidapi`.
 
 ## Usage
 
